@@ -94,6 +94,7 @@ KAGGLE_COMPETITION_RESOURCES = {
         "files": ("train_transaction.csv", "train_identity.csv"),
     }
 }
+_DOWNLOADED_DATA_FILES: dict[str, Path] = {}
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,10 @@ def find_data_file(
     if filename not in RELATIVE_DATA_FILES:
         raise KeyError(f"No path configuration exists for {filename!r}.")
 
+    registered_path = _DOWNLOADED_DATA_FILES.get(filename)
+    if registered_path is not None and registered_path.is_file():
+        return registered_path
+
     if is_kaggle_runtime():
         hinted_path = KAGGLE_DATA_HINTS[filename]
         if hinted_path.is_file():
@@ -166,6 +171,42 @@ def find_data_file(
     )
 
 
+def _resolve_kagglehub_file(
+    download_result: str | Path,
+    filename: str,
+    destination: Path,
+) -> Path:
+    """Resolve a file whether KaggleHub attached it or used ``output_dir``."""
+    returned_path = Path(download_result).resolve()
+    candidates: list[Path] = []
+
+    if returned_path.is_file() and returned_path.name == filename:
+        candidates.append(returned_path)
+    elif returned_path.is_dir():
+        direct_return = returned_path / filename
+        if direct_return.is_file():
+            candidates.append(direct_return)
+        candidates.extend(returned_path.rglob(filename))
+
+    direct_destination = destination / filename
+    if direct_destination.is_file():
+        candidates.append(direct_destination)
+    if destination.is_dir():
+        candidates.extend(destination.rglob(filename))
+    if KAGGLE_INPUT_ROOT.is_dir():
+        candidates.extend(KAGGLE_INPUT_ROOT.rglob(filename))
+
+    candidates = list(
+        dict.fromkeys(path.resolve() for path in candidates if path.is_file())
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"KaggleHub finished but {filename!r} was not found. "
+            f"Returned path: {returned_path}; output directory: {destination}"
+        )
+    return candidates[0]
+
+
 def download_kaggle_data(
     datasets: Sequence[str] = SUPPORTED_DATASETS,
     *,
@@ -194,23 +235,19 @@ def download_kaggle_data(
                 destination = root / RELATIVE_DATA_FILES[filename].parent
                 destination.mkdir(parents=True, exist_ok=True)
                 existing = destination / filename
+                download_result: str | Path = existing
                 if not existing.is_file() or force_download:
                     print(f"[DOWNLOAD] {dataset}: {filename}")
-                    kagglehub.dataset_download(
+                    download_result = kagglehub.dataset_download(
                         resource["handle"],
                         path=filename,
                         output_dir=str(destination),
                         force_download=force_download,
                     )
-                if not existing.is_file():
-                    matches = list(destination.rglob(filename))
-                    if len(matches) != 1:
-                        raise FileNotFoundError(
-                            f"KaggleHub finished but {filename!r} was not found "
-                            f"under {destination}. Matches: {matches}"
-                        )
-                    existing = matches[0]
-                resolved[filename] = existing.resolve()
+                resolved[filename] = _resolve_kagglehub_file(
+                    download_result, filename, destination
+                )
+                _DOWNLOADED_DATA_FILES[filename] = resolved[filename]
 
         if dataset in KAGGLE_COMPETITION_RESOURCES:
             resource = KAGGLE_COMPETITION_RESOURCES[dataset]
@@ -218,10 +255,11 @@ def download_kaggle_data(
                 destination = root / RELATIVE_DATA_FILES[filename].parent
                 destination.mkdir(parents=True, exist_ok=True)
                 existing = destination / filename
+                download_result = existing
                 if not existing.is_file() or force_download:
                     print(f"[DOWNLOAD] {dataset}: {filename}")
                     try:
-                        kagglehub.competition_download(
+                        download_result = kagglehub.competition_download(
                             resource["handle"],
                             path=filename,
                             output_dir=str(destination),
@@ -233,15 +271,10 @@ def download_kaggle_data(
                             "ieee-fraud-detection bằng đúng tài khoản Kaggle, "
                             "chấp nhận rules rồi chạy lại cell tải dữ liệu."
                         ) from exc
-                if not existing.is_file():
-                    matches = list(destination.rglob(filename))
-                    if len(matches) != 1:
-                        raise FileNotFoundError(
-                            f"KaggleHub finished but {filename!r} was not found "
-                            f"under {destination}. Matches: {matches}"
-                        )
-                    existing = matches[0]
-                resolved[filename] = existing.resolve()
+                resolved[filename] = _resolve_kagglehub_file(
+                    download_result, filename, destination
+                )
+                _DOWNLOADED_DATA_FILES[filename] = resolved[filename]
 
     for filename, path in resolved.items():
         print(f"[READY] {filename}: {path}")
