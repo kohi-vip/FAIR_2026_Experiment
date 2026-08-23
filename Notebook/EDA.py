@@ -78,6 +78,23 @@ KAGGLE_DATA_HINTS = {
     "fraudTest.csv": KAGGLE_INPUT_ROOT / "fraud-detection" / "fraudTest.csv",
 }
 
+KAGGLE_DATASET_RESOURCES = {
+    "MLG_ULB": {
+        "handle": "mlg-ulb/creditcardfraud",
+        "files": ("creditcard.csv",),
+    },
+    "Sparkov": {
+        "handle": "kartik2112/fraud-detection",
+        "files": ("fraudTrain.csv", "fraudTest.csv"),
+    },
+}
+KAGGLE_COMPETITION_RESOURCES = {
+    "IEEE_CIS": {
+        "handle": "ieee-fraud-detection",
+        "files": ("train_transaction.csv", "train_identity.csv"),
+    }
+}
+
 
 @dataclass(frozen=True)
 class FoldArtifacts:
@@ -133,10 +150,102 @@ def find_data_file(
     workspace_path = get_project_root(project_root) / RELATIVE_DATA_FILES[filename]
     if workspace_path.is_file():
         return workspace_path
+
+    raw_data_root = get_project_root(project_root) / "data" / "Raw_data"
+    workspace_matches = list(raw_data_root.rglob(filename))
+    if len(workspace_matches) == 1:
+        return workspace_matches[0]
+    if len(workspace_matches) > 1:
+        rendered = "\n".join(str(path) for path in workspace_matches)
+        raise RuntimeError(
+            f"Multiple downloaded files are named {filename!r}:\n{rendered}"
+        )
     raise FileNotFoundError(
         f"Could not find {filename!r} at {workspace_path}"
         + (" or under /kaggle/input" if is_kaggle_runtime() else "")
     )
+
+
+def download_kaggle_data(
+    datasets: Sequence[str] = SUPPORTED_DATASETS,
+    *,
+    force_download: bool = False,
+    project_root: str | Path | None = None,
+) -> dict[str, Path]:
+    """Download selected raw files with Kaggle's official ``kagglehub`` API.
+
+    Public datasets authenticate automatically inside Kaggle notebooks. The
+    IEEE-CIS competition requires the current Kaggle account to accept its
+    rules before its files can be downloaded.
+    """
+    datasets = _validate_datasets(datasets)
+    try:
+        import kagglehub
+    except ImportError as exc:
+        raise ImportError("Missing kagglehub. Run: pip install kagglehub") from exc
+
+    root = get_project_root(project_root)
+    resolved: dict[str, Path] = {}
+
+    for dataset in datasets:
+        if dataset in KAGGLE_DATASET_RESOURCES:
+            resource = KAGGLE_DATASET_RESOURCES[dataset]
+            for filename in resource["files"]:
+                destination = root / RELATIVE_DATA_FILES[filename].parent
+                destination.mkdir(parents=True, exist_ok=True)
+                existing = destination / filename
+                if not existing.is_file() or force_download:
+                    print(f"[DOWNLOAD] {dataset}: {filename}")
+                    kagglehub.dataset_download(
+                        resource["handle"],
+                        path=filename,
+                        output_dir=str(destination),
+                        force_download=force_download,
+                    )
+                if not existing.is_file():
+                    matches = list(destination.rglob(filename))
+                    if len(matches) != 1:
+                        raise FileNotFoundError(
+                            f"KaggleHub finished but {filename!r} was not found "
+                            f"under {destination}. Matches: {matches}"
+                        )
+                    existing = matches[0]
+                resolved[filename] = existing.resolve()
+
+        if dataset in KAGGLE_COMPETITION_RESOURCES:
+            resource = KAGGLE_COMPETITION_RESOURCES[dataset]
+            for filename in resource["files"]:
+                destination = root / RELATIVE_DATA_FILES[filename].parent
+                destination.mkdir(parents=True, exist_ok=True)
+                existing = destination / filename
+                if not existing.is_file() or force_download:
+                    print(f"[DOWNLOAD] {dataset}: {filename}")
+                    try:
+                        kagglehub.competition_download(
+                            resource["handle"],
+                            path=filename,
+                            output_dir=str(destination),
+                            force_download=force_download,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "Không tải được IEEE-CIS. Hãy mở competition "
+                            "ieee-fraud-detection bằng đúng tài khoản Kaggle, "
+                            "chấp nhận rules rồi chạy lại cell tải dữ liệu."
+                        ) from exc
+                if not existing.is_file():
+                    matches = list(destination.rglob(filename))
+                    if len(matches) != 1:
+                        raise FileNotFoundError(
+                            f"KaggleHub finished but {filename!r} was not found "
+                            f"under {destination}. Matches: {matches}"
+                        )
+                    existing = matches[0]
+                resolved[filename] = existing.resolve()
+
+    for filename, path in resolved.items():
+        print(f"[READY] {filename}: {path}")
+    return resolved
 
 
 def _validate_datasets(datasets: Sequence[str]) -> tuple[str, ...]:
